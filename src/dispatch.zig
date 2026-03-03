@@ -259,10 +259,14 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
 
             const index: usize = @intCast(value - TypeStats.minCase);
 
-            if (JumpTableDef[index]) |prong| {
-                try prong.dispatch(ctx, value);
+            if (comptime @typeInfo(JumpTableType()) == .Optional) {
+                if (JumpTableDef[index]) |prong| {
+                    try prong.dispatch(ctx, value);
+                } else {
+                    return StreamedDispatchError.NoMatch;
+                }
             } else {
-                return StreamedDispatchError.NoMatch;
+                JumpTableDef[index].dispatch(ctx, value);
             }
         }
 
