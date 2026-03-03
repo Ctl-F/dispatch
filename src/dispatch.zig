@@ -14,8 +14,12 @@ const Binding = struct {
     }
 };
 
-pub fn case(branchValue: anytype, prong: anytype) CasePool(@TypeOf(branchValue), anyerror).Case {
-    const ExpectedProngType = CasePool(@TypeOf(branchValue), anyerror).Prong;
+pub fn case(branchValue: anytype, prong: anytype) CasePool(@TypeOf(branchValue), anyopaque, anyerror).Case {
+    return caseWithContext(anyopaque, branchValue, prong);
+}
+
+pub fn caseWithContext(comptime ContextType: type, branchValue: anytype, prong: anytype) CasePool(@TypeOf(branchValue), ContextType, anyerror).Case {
+    const ExpectedProngType = CasePool(@TypeOf(branchValue), ContextType, anyerror).Prong;
     const ProngType = @TypeOf(prong);
 
     if (ProngType == ExpectedProngType) {
@@ -41,30 +45,30 @@ pub fn binding(comptime callName: []const u8, comptime callable: type) Binding {
     };
 }
 
-pub fn CasePool(comptime BranchType: type, comptime ErrorType: type) type {
+pub fn CasePool(comptime BranchType: type, comptime ContextType: type, comptime ErrorType: type) type {
     return struct {
         const __CasePool__ = @This();
 
-        const ConditionType = BranchType;
-        const ExceptionType = ErrorType;
+        const BranchTy = BranchType;
+        const ErrorTy = ErrorType;
+        const ContextTy = ContextType;
 
         pub const Prong = struct {
-            const CallableType = fn (v: BranchType) ErrorType!void;
-            const ErrorHandlerType = fn (v: BranchType, e: ErrorType) ErrorType!void;
+            const CallableType = fn (ctx: *ContextType, v: BranchType) ErrorType!void;
+            const ErrorHandlerType = fn (ctx: *ContextType, v: BranchType, e: ErrorType) ErrorType!void;
 
             callable: ?CallableType,
             binding: ?Binding = null,
-            //onError: ?ErrorHandlerType = null,
 
-            inline fn dispatch(this: @This(), v: BranchType) ErrorType!void {
+            inline fn dispatch(this: @This(), ctx: *ContextType, v: BranchType) ErrorType!void {
                 if (this.callable) |callable| {
-                    try callable(v);
+                    try callable(ctx, v);
                     return;
                 }
                 if (this.binding) |binder| {
-                    @call(.auto, @field(binder.definition, binder.callable), .{v}) catch |e| {
+                    @call(.auto, @field(binder.definition, binder.callable), .{ ctx, v }) catch |e| {
                         if (binder.errorHandler) |onError| {
-                            try @call(.auto, @field(binder.definition, onError), .{ v, e });
+                            try @call(.auto, @field(binder.definition, onError), .{ ctx, v, e });
                         } else {
                             return e;
                         }
@@ -98,13 +102,13 @@ pub fn CasePool(comptime BranchType: type, comptime ErrorType: type) type {
             }
 
             const RuntimeProng = struct {
-                callable: *const fn (v: BranchType) ErrorType!void,
-                catcher: ?*const fn (v: BranchType, e: ErrorType) ErrorType!void,
+                callable: *const fn (ctx: *ContextType, v: BranchType) ErrorType!void,
+                catcher: ?*const fn (ctx: *ContextType, v: BranchType, e: ErrorType) ErrorType!void,
 
-                inline fn dispatch(this: @This(), v: BranchType) ErrorType!void {
-                    this.callable(v) catch |e| {
+                inline fn dispatch(this: @This(), ctx: *ContextTy, v: BranchType) ErrorType!void {
+                    this.callable(ctx, v) catch |e| {
                         if (this.catcher) |catcher| {
-                            try catcher(v, e);
+                            try catcher(ctx, v, e);
                         } else {
                             return e;
                         }
@@ -121,12 +125,16 @@ pub fn CasePool(comptime BranchType: type, comptime ErrorType: type) type {
     };
 }
 
-pub fn build(comptime BranchType: type, comptime casePool: CasePool(BranchType, anyerror)) type {
-    return buildImpl(CasePool(BranchType, anyerror), casePool);
+pub fn build(comptime BranchType: type, comptime casePool: CasePool(BranchType, anyopaque, anyerror)) type {
+    return buildImpl(CasePool(BranchType, anyopaque, anyerror), casePool);
 }
 
-pub fn buildWithErrorType(comptime BranchType: type, comptime ErrorType: type, comptime casePool: CasePool(BranchType, ErrorType)) type {
-    return buildImpl(CasePool(BranchType, ErrorType), casePool);
+pub fn buildWithContextType(comptime BranchType: type, comptime ContextType: type, comptime casePool: CasePool(BranchType, ContextType, anyerror)) type {
+    return buildImpl(CasePool(BranchType, ContextType, anyerror), casePool);
+}
+
+pub fn buildWithErrorType(comptime BranchType: type, comptime ContextType: type, comptime ErrorType: type, comptime casePool: CasePool(BranchType, ContextType, ErrorType)) type {
+    return buildImpl(CasePool(BranchType, ContextType, ErrorType), casePool);
 }
 
 fn buildImpl(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
@@ -145,19 +153,19 @@ pub const StreamedDispatchError = error{NoMatch};
 
 fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
     return struct {
-        pub fn do(value: CasePoolType.ConditionType) (CasePoolType.ExceptionType || StreamedDispatchError)!void {
+        pub fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             inline for (casePool.cases) |caseValue| {
-                if (caseValue.value == value) {
-                    try caseValue.prong.dispatch(value);
+                if (std.meta.eql(caseValue.value, value)) {
+                    try caseValue.prong.dispatch(ctx, value);
                     return;
                 }
             }
             return StreamedDispatchError.NoMatch;
         }
 
-        pub fn doAll(values: []const CasePoolType.ConditionType) (CasePoolType.ExceptionType || StreamedDispatchError)!void {
+        pub fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             for (values) |value| {
-                try @This().do(value);
+                try @This().do(ctx, value);
             }
         }
     };
@@ -166,16 +174,16 @@ fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
 fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
     return struct {
         const Stats = struct {
-            minCase: CasePoolType.ConditionType,
-            maxCase: CasePoolType.ConditionType,
+            minCase: CasePoolType.BranchTy,
+            maxCase: CasePoolType.BranchTy,
             range: usize,
             numCases: usize,
         };
 
         fn getStats() Stats {
             var stats = Stats{
-                .minCase = std.math.maxInt(CasePoolType.ConditionType),
-                .maxCase = std.math.minInt(CasePoolType.ConditionType),
+                .minCase = std.math.maxInt(CasePoolType.BranchTy),
+                .maxCase = std.math.minInt(CasePoolType.BranchTy),
                 .range = 0,
                 .numCases = 0,
             };
@@ -196,33 +204,55 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
             return stats;
         }
 
+        fn JumpTableType() type {
+            if (TypeStats.numCases == (TypeStats.maxCase - TypeStats.minCase)) {
+                return CasePoolType.Prong.RuntimeProng;
+            }
+            return ?CasePoolType.Prong.RuntimeProng;
+        }
+
+        fn JumpTableDefault() JumpTableType() {
+            if (TypeStats.numCases == (TypeStats.maxCase - TypeStats.minCase)) {
+                return JumpTableType(){
+                    .callable = &@field(struct {
+                        fn a(ctx: *CasePoolType.ContextTy, v: CasePoolType.BranchTy) CasePoolType.ErrorTy!void {
+                            _ = ctx;
+                            _ = v;
+                            // unreachable since this function is a placeholder, and should only be used
+                            // when all cases are filled in the jumptable. Therefore if this is still
+                            // around it signifies a bug in jumptable type logic.
+                            unreachable;
+                        }
+                    }, "a"),
+                    .catcher = null,
+                };
+            }
+            return null;
+        }
+
         const TypeStats = getStats();
         const JumpTableDef = RET: {
             if (TypeStats.numCases == 0) {
                 @compileError("JumpTable requires at least one case");
             }
 
-            var table = [_]?CasePoolType.Prong.RuntimeProng{null} ** TypeStats.range;
+            var table = [_]JumpTableType(){JumpTableDefault()} ** TypeStats.range;
 
             for (casePool.cases) |_case| {
                 const idx = @as(usize, @intCast(_case.value - TypeStats.minCase));
 
-                if (table[idx] != null) {
+                // if (table[idx] != JumpTableDefault()) {
+                if (!std.meta.eql(table[idx], JumpTableDefault())) {
                     @compileError("Duplicate case value detected");
                 }
 
                 table[idx] = _case.prong.toRuntimeProng();
-                // if (_case.prong.callable) |callable| {
-                //     table[idx] = &callable;
-                // } else if (_case.prong.binding) |binder| {
-                //     table[idx] = &@field(binder.definition, binder.callable);
-                // } else @compileError("prong has no valid execution path");
             }
 
             break :RET table;
         };
 
-        pub fn do(value: CasePoolType.ConditionType) (CasePoolType.ExceptionType || StreamedDispatchError)!void {
+        pub fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             if (value < TypeStats.minCase or value > TypeStats.maxCase) {
                 return StreamedDispatchError.NoMatch;
             }
@@ -230,15 +260,15 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
             const index: usize = @intCast(value - TypeStats.minCase);
 
             if (JumpTableDef[index]) |prong| {
-                try prong.dispatch(value);
+                try prong.dispatch(ctx, value);
             } else {
                 return StreamedDispatchError.NoMatch;
             }
         }
 
-        pub fn doAll(values: []const CasePoolType.ConditionType) (CasePoolType.ExceptionType || StreamedDispatchError)!void {
+        pub fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             for (values) |value| {
-                try @This().do(value);
+                try @This().do(ctx, value);
             }
         }
     };
