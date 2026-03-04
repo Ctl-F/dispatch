@@ -34,7 +34,9 @@ pub fn caseWithContext(comptime ContextType: type, branchValue: anytype, prong: 
         return .{ .value = branchValue, .prong = .{ .callable = null, .binding = prong } };
     }
 
-    @compileError("Expected type: " ++ @typeName(ExpectedProngType) ++ " or " ++ @typeName(ExpectedProngType.CallableType) ++ " got " ++ @typeName(ProngType));
+    return .{ .value = branchValue, .prong = .{ .callable = prong } };
+
+    //@compileError("Expected type: " ++ @typeName(ExpectedProngType) ++ " or " ++ @typeName(ExpectedProngType.CallableType) ++ " got " ++ @typeName(ProngType));
 }
 
 pub fn binding(comptime callName: []const u8, comptime callable: type) Binding {
@@ -144,7 +146,7 @@ fn buildImpl(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
         return IfChain(CasePoolType, casePool);
     }
 
-    return JumpTable(CasePoolType, casePool);
+    return NativeSwitch(CasePoolType, casePool);
 
     //@compileError("Unable to build a dispatch table from provided case pool");
 }
@@ -267,6 +269,62 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
                 }
             } else {
                 JumpTableDef[index].dispatch(ctx, value);
+            }
+        }
+
+        pub fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+            for (values) |value| {
+                try @This().do(ctx, value);
+            }
+        }
+    };
+}
+
+fn NativeSwitch(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
+    return struct {
+        pub fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+            const info = @typeInfo(CasePoolType.BranchTy);
+
+            const fields, const enumTy, const isUnion = switch (info) {
+                .@"enum" => |enu| .{ enu.fields, enu, false },
+                .@"union" => |unu| UNU: {
+                    if (unu.tag_type == null) {
+                        @compileError("Union must be tagged in order to be used in a NativeSwitch dispatch.");
+                    }
+
+                    const tagType = @typeInfo(unu.tag_type.?).@"enum";
+
+                    break :UNU .{ tagType.fields, tagType, true };
+                },
+                else => @compileError("NativeSwitch is only allowed on enums or tagged unions."),
+            };
+
+            _ = enumTy; // remove it really not needed
+
+            if (casePool.cases.len != fields.len) {
+                @compileError("Not every enum case has a handler.");
+            }
+
+            if (comptime isUnion) {
+                switch (value) {
+                    inline else => |payload, tag| {
+                        inline for (casePool.cases) |_case| {
+                            if (comptime tag == _case.value) {
+                                try _case.prong.dispatch(ctx, payload);
+                            }
+                        }
+                    },
+                }
+            } else {
+                switch (value) {
+                    inline else => |val| {
+                        inline for (casePool.cases) |_case| {
+                            if (comptime val == _case.value) {
+                                try _case.prong.dispatch(ctx, val);
+                            }
+                        }
+                    },
+                }
             }
         }
 
