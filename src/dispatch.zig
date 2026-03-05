@@ -140,7 +140,7 @@ pub fn buildWithErrorType(comptime BranchType: type, comptime ContextType: type,
 }
 
 fn buildImpl(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
-    const ThresholdForIfChain = 5;
+    const ThresholdForIfChain = 1;
 
     if (casePool.cases.len < ThresholdForIfChain) {
         return IfChain(CasePoolType, casePool);
@@ -309,7 +309,7 @@ fn NativeSwitch(comptime CasePoolType: type, comptime casePool: CasePoolType) ty
                 switch (value) {
                     inline else => |payload, tag| {
                         inline for (casePool.cases) |_case| {
-                            if (comptime tag == _case.value) {
+                            if (comptime tag == std.meta.activeTag(_case.value)) {
                                 try _case.prong.dispatch(ctx, payload);
                             }
                         }

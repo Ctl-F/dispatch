@@ -26,17 +26,17 @@ const Cases = union(CasesTag) {
         add: f32,
     };
 
-    fn onFirst(ctx: *anyopaque, f: Cases) anyerror!void {
+    pub fn onFirst(ctx: *anyopaque, f: Cases) anyerror!void {
         _ = ctx;
         std.debug.print("This is a string {s} and a float {}\n", .{ f.first.string, f.first.add });
     }
 
-    fn onSecond(ctx: *anyopaque, s: Cases) anyerror!void {
+    pub fn onSecond(ctx: *anyopaque, s: Cases) anyerror!void {
         _ = ctx;
         std.debug.print("{}\n", .{s.second});
     }
 
-    fn onThird(ctx: *anyopaque, t: Cases) anyerror!void {
+    pub fn onThird(ctx: *anyopaque, t: Cases) anyerror!void {
         _ = ctx;
         std.debug.print("{}+2 = {}\n", .{ t.third, t.third + 2 });
     }
@@ -45,9 +45,9 @@ const Cases = union(CasesTag) {
 pub fn main() !void {
     const decision = dispatch.build(Cases, .{
         .cases = &.{
-            case(Cases.first, Cases.onFirst),
-            case(Cases.second, Cases.onSecond),
-            case(Cases.third, Cases.onThird),
+            case(Cases{ .first = .{ .string = "Hello ", .add = 42.0 } }, binding("onFirst", Cases)),
+            case(Cases{ .second = false }, binding("onSecond", Cases)),
+            case(Cases{ .third = 0 }, binding("onThird", Cases)),
         },
     });
 
