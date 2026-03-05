@@ -22,33 +22,37 @@ const Cases = union(CasesTag) {
     third: i32,
 
     const First = struct {
-        string: []const u8,
-        add: f32,
+        string: []const u8 = "",
+        add: f32 = 0,
     };
 
-    pub fn onFirst(ctx: *anyopaque, f: Cases) anyerror!void {
+    pub fn on_first(ctx: *anyopaque, f: First) anyerror!void {
         _ = ctx;
-        std.debug.print("This is a string {s} and a float {}\n", .{ f.first.string, f.first.add });
+        std.debug.print("This is a string {s} and a float {}\n", .{ f.string, f.add });
     }
 
-    pub fn onSecond(ctx: *anyopaque, s: Cases) anyerror!void {
+    pub fn on_second(ctx: *anyopaque, s: bool) anyerror!void {
         _ = ctx;
-        std.debug.print("{}\n", .{s.second});
+        std.debug.print("{}\n", .{s});
     }
 
-    pub fn onThird(ctx: *anyopaque, t: Cases) anyerror!void {
+    pub fn on_third(ctx: *anyopaque, t: i32) anyerror!void {
         _ = ctx;
-        std.debug.print("{}+2 = {}\n", .{ t.third, t.third + 2 });
+        std.debug.print("{} + 2 = {}\n", .{ t, t + 2 });
     }
 };
 
 pub fn main() !void {
+    // const decision = dispatch.build(Cases, .{
+    //     .cases = &.{
+    //         case(Cases{ .first = .{} }, binding("onFirst", Cases)),
+    //         case(Cases{ .second = false }, binding("onSecond", Cases)),
+    //         case(Cases{ .third = 0 }, binding("onThird", Cases)),
+    //     },
+    // });
+
     const decision = dispatch.build(Cases, .{
-        .cases = &.{
-            case(Cases{ .first = .{ .string = "Hello ", .add = 42.0 } }, binding("onFirst", Cases)),
-            case(Cases{ .second = false }, binding("onSecond", Cases)),
-            case(Cases{ .third = 0 }, binding("onThird", Cases)),
-        },
+        .cases = dispatch.unwrapCases(Cases, "on_"),
     });
 
     try decision.do(&.{}, Cases{ .first = .{ .string = "Hello ", .add = 42.0 } });

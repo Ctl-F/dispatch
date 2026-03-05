@@ -14,6 +14,49 @@ const Binding = struct {
     }
 };
 
+pub fn unwrapCases(bindee: type, comptime prefix: []const u8) []const CasePool(bindee, anyopaque, anyerror).Case {
+    const CasePoolType = CasePool(bindee, anyopaque, anyerror);
+    const info = @typeInfo(bindee);
+
+    if (info != .@"union") {
+        @compileError("unwrapCases case only be used with a tagged union.");
+    }
+
+    const unionInfo = info.@"union";
+
+    if (unionInfo.tag_type == null) {
+        @compileError("unwrapCases expects a tagged union.");
+    }
+
+    const tags = unionInfo.tag_type.?;
+    const tagsInfo = @typeInfo(tags).@"enum";
+
+    comptime var cases: [tagsInfo.fields.len]CasePoolType.Case = undefined;
+
+    inline for (tagsInfo.fields, 0..) |field, idx| {
+        const _binding = binding(prefix ++ field.name, bindee);
+        const instance = @unionInit(bindee, field.name, default(@FieldType(bindee, field.name)));
+        cases[idx] = CasePoolType.Case{ .value = instance, .prong = .{ .binding = _binding, .callable = null } };
+    }
+
+    const casesConcrete = cases;
+
+    return &casesConcrete;
+}
+
+fn default(comptime T: type) T {
+    const info = @typeInfo(T);
+
+    return switch (info) {
+        .int, .comptime_int => 0,
+        .float, .comptime_float => 0.0,
+        .array => .{},
+        .bool => false,
+        .optional => null,
+        else => std.mem.zeroInit(T, .{}),
+    };
+}
+
 pub fn case(branchValue: anytype, prong: anytype) CasePool(@TypeOf(branchValue), anyopaque, anyerror).Case {
     return caseWithContext(anyopaque, branchValue, prong);
 }
@@ -62,7 +105,7 @@ pub fn CasePool(comptime BranchType: type, comptime ContextType: type, comptime 
             callable: ?CallableType,
             binding: ?Binding = null,
 
-            inline fn dispatch(this: @This(), ctx: *ContextType, v: BranchType) ErrorType!void {
+            inline fn dispatch(this: @This(), ctx: *ContextType, v: anytype) ErrorType!void {
                 if (this.callable) |callable| {
                     try callable(ctx, v);
                     return;
@@ -107,6 +150,10 @@ pub fn CasePool(comptime BranchType: type, comptime ContextType: type, comptime 
                 callable: *const fn (ctx: *ContextType, v: BranchType) ErrorType!void,
                 catcher: ?*const fn (ctx: *ContextType, v: BranchType, e: ErrorType) ErrorType!void,
 
+                // TODO: see if we need to convert this v to anytype also
+                // I think we're ok keeping this as a BranchType because
+                // RuntimeProng is only ever used for JumpTables which require the branchtype
+                // anyway. Whereas we need anytype in the non-runtime Prong to accomodate tagged-unions
                 inline fn dispatch(this: @This(), ctx: *ContextTy, v: BranchType) ErrorType!void {
                     this.callable(ctx, v) catch |e| {
                         if (this.catcher) |catcher| {
