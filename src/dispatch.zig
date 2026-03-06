@@ -1,4 +1,5 @@
 const std = @import("std");
+const util = @import("util");
 
 const Binding = struct {
     definition: type,
@@ -35,26 +36,13 @@ pub fn unwrapCases(bindee: type, comptime prefix: []const u8) []const CasePool(b
 
     inline for (tagsInfo.fields, 0..) |field, idx| {
         const _binding = binding(prefix ++ field.name, bindee);
-        const instance = @unionInit(bindee, field.name, default(@FieldType(bindee, field.name)));
+        const instance = @unionInit(bindee, field.name, util.default(@FieldType(bindee, field.name)));
         cases[idx] = CasePoolType.Case{ .value = instance, .prong = .{ .binding = _binding, .callable = null } };
     }
 
     const casesConcrete = cases;
 
     return &casesConcrete;
-}
-
-fn default(comptime T: type) T {
-    const info = @typeInfo(T);
-
-    return switch (info) {
-        .int, .comptime_int => 0,
-        .float, .comptime_float => 0.0,
-        .array => .{},
-        .bool => false,
-        .optional => null,
-        else => std.mem.zeroInit(T, .{}),
-    };
 }
 
 pub fn case(branchValue: anytype, prong: anytype) CasePool(@TypeOf(branchValue), anyopaque, anyerror).Case {
@@ -97,6 +85,21 @@ pub fn CasePool(comptime BranchType: type, comptime ContextType: type, comptime 
         const BranchTy = BranchType;
         const ErrorTy = ErrorType;
         const ContextTy = ContextType;
+
+        fn cmpCase(ctx: *anyopaque, a: Case, b: Case) bool {
+            _ = ctx;
+            return a.value < b.value;
+        }
+        fn hasDuplicates(comptime cases: []Case) bool {
+            comptime {
+                std.sort.block(Case, cases, &.{}, cmpCase);
+
+                for (1..cases.len) |i| {
+                    if (std.meta.eql(cases[i], cases[i - 1])) return true;
+                }
+                return false;
+            }
+        }
 
         pub const Prong = struct {
             const CallableType = fn (ctx: *ContextType, v: BranchType) ErrorType!void;
@@ -202,17 +205,70 @@ pub const StreamedDispatchError = error{NoMatch};
 
 fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
     return struct {
-        pub fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
-            inline for (casePool.cases) |caseValue| {
-                if (std.meta.eql(caseValue.value, value)) {
-                    try caseValue.prong.dispatch(ctx, value);
-                    return;
+        inline fn casesAreContiguous() bool {
+            comptime {
+                if (getCasesMinMax()) |minMax| {
+                    if (minMax.max - minMax.min == casePool.cases.len and !CasePoolType.hasDuplicates(casePool.cases)) {
+                        return true;
+                    }
+                    return false;
                 }
+                return false;
             }
-            return StreamedDispatchError.NoMatch;
         }
 
-        pub fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+        fn getCasesMinMax() ?struct { min: CasePoolType.BranchTy, max: CasePoolType.BranchTy } {
+            comptime {
+                if (!util.canMinMax(CasePoolType.BranchTy)) {
+                    return null;
+                }
+
+                var minMax: struct { min: CasePoolType.BranchTy, max: CasePoolType.BranchTy } = .{
+                    .min = util.maxValue(CasePoolType.BranchTy),
+                    .max = util.minValue(CasePoolType.BranchTy),
+                };
+
+                for (casePool.cases) |_case| {
+                    minMax.min = @min(_case.value, minMax.min);
+                    minMax.max = @max(_case.value, minMax.max);
+                }
+
+                return minMax;
+            }
+        }
+
+        pub inline fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+            if (comptime casesAreContiguous()) {
+                // if cases are min/max able and contiguous e.g. no holes
+                // then we can adopt this pattern which allows us to insert an unreachable
+                // at the end of the inline for and the optimizer can refactor this into a
+                // switch statement.
+                const minMax = getCasesMinMax().?;
+
+                if (value < minMax.min or value > minMax.max) {
+                    return StreamedDispatchError.NoMatch;
+                }
+
+                inline for (casePool.cases) |caseValue| {
+                    if (std.meta.eql(caseValue.value, value)) {
+                        try caseValue.prong.dispatch(ctx, value);
+                        return;
+                    }
+                }
+
+                unreachable;
+            } else {
+                inline for (casePool.cases) |caseValue| {
+                    if (std.meta.eql(caseValue.value, value)) {
+                        try caseValue.prong.dispatch(ctx, value);
+                        return;
+                    }
+                }
+                return StreamedDispatchError.NoMatch;
+            }
+        }
+
+        pub inline fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             for (values) |value| {
                 try @This().do(ctx, value);
             }
@@ -221,6 +277,13 @@ fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
 }
 
 fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
+    const info = @typeInfo(CasePoolType.BranchTy);
+
+    switch (info) {
+        .int, .comptime_int => {},
+        else => @compileError("Jump Table requires integral branch type"),
+    }
+
     return struct {
         const Stats = struct {
             minCase: CasePoolType.BranchTy,
@@ -261,7 +324,7 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
         }
 
         fn JumpTableDefault() JumpTableType() {
-            if (TypeStats.numCases == (TypeStats.maxCase - TypeStats.minCase)) {
+            if (TypeStats.numCases == (TypeStats.maxCase - TypeStats.minCase + 1)) {
                 return JumpTableType(){
                     .callable = &@field(struct {
                         fn a(ctx: *CasePoolType.ContextTy, v: CasePoolType.BranchTy) CasePoolType.ErrorTy!void {
@@ -301,7 +364,7 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
             break :RET table;
         };
 
-        pub fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+        pub inline fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             if (value < TypeStats.minCase or value > TypeStats.maxCase) {
                 return StreamedDispatchError.NoMatch;
             }
@@ -319,7 +382,7 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
             }
         }
 
-        pub fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+        pub inline fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             for (values) |value| {
                 try @This().do(ctx, value);
             }
@@ -329,24 +392,8 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
 
 fn NativeSwitch(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
     return struct {
-        pub fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
-            const info = @typeInfo(CasePoolType.BranchTy);
-
-            const fields, const enumTy, const isUnion = switch (info) {
-                .@"enum" => |enu| .{ enu.fields, enu, false },
-                .@"union" => |unu| UNU: {
-                    if (unu.tag_type == null) {
-                        @compileError("Union must be tagged in order to be used in a NativeSwitch dispatch.");
-                    }
-
-                    const tagType = @typeInfo(unu.tag_type.?).@"enum";
-
-                    break :UNU .{ tagType.fields, tagType, true };
-                },
-                else => @compileError("NativeSwitch is only allowed on enums or tagged unions."),
-            };
-
-            _ = enumTy; // remove it really not needed
+        pub inline fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+            const fields, const isUnion = validateInfo();
 
             if (casePool.cases.len != fields.len) {
                 @compileError("Not every enum case has a handler.");
@@ -375,55 +422,67 @@ fn NativeSwitch(comptime CasePoolType: type, comptime casePool: CasePoolType) ty
             }
         }
 
-        pub fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+        pub inline fn doAll(ctx: *CasePoolType.ContextTy, values: []const CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
             for (values) |value| {
                 try @This().do(ctx, value);
             }
         }
+
+        fn validateInfo() struct { fields: []const std.builtin.Type.EnumField, isUnion: bool } {
+            const info = @typeInfo(CasePoolType.BranchTy);
+
+            const fields, const isUnion = switch (info) {
+                .@"enum" => |enu| .{ enu.fields, false },
+                .@"union" => |unu| UNU: {
+                    if (unu.tag_type == null) {
+                        @compileError("Union must be tagged in order to be used in a NativeSwitch dispatch.");
+                    }
+
+                    const tagType = @typeInfo(unu.tag_type.?).@"enum";
+
+                    break :UNU .{ tagType.fields, true };
+                },
+                else => @compileError("NativeSwitch is only allowed on enums or tagged unions."),
+            };
+
+            return .{ .fields = fields, .isUnion = isUnion };
+        }
+
+        pub inline fn doStreamed(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy, comptime selector: fn (c: *CasePoolType.ContextTy) ?CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
+            const fields, const isUnion = validateInfo();
+
+            if (casePool.cases.len != fields.len) {
+                @compileError("Not every enum case has a handler.");
+            }
+
+            if (comptime isUnion) {
+                SWITCH: switch (value) {
+                    inline else => |payload, tag| {
+                        inline for (casePool.cases) |_case| {
+                            if (comptime tag == std.meta.activeTag(_case.value)) {
+                                try _case.prong.dispatch(ctx, payload);
+                                if (selector(ctx)) |next| {
+                                    continue :SWITCH next;
+                                }
+                            }
+                        }
+                    },
+                }
+            } else {
+                SWITCH: switch (value) {
+                    inline else => |val| {
+                        inline for (casePool.cases) |_case| {
+                            if (comptime val == _case.value) {
+                                try _case.prong.dispatch(ctx, val);
+
+                                if (selector(ctx)) |next| {
+                                    continue :SWITCH next;
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
     };
 }
-
-// Main API:
-//
-// const std = @import("std");
-// const dispatch = @import("dispatch");
-
-// const binding = dispatch.binding;
-// const case = dispatch.case;
-
-// inline fn case10() !void {
-//    std.debug.print("case 10!\n", .{});
-// }
-
-// inline fn case11() !void {
-//    std.debug.print("case 10 + 1!\n", .{});
-// }
-
-// inline fn case12() !void {
-//    std.debug.print("case 12 is nice!\n", .{});
-// }
-
-// fn main() !void {
-//   const cases = .{
-//      case(10, case10),
-//      case(11, case11),
-//      case(12, case12),
-//      case(13, binding("a", struct{
-//          pub inline fn a(v: i32) !void {
-//              std.debug.print("this one is from an inline-struct: {}\n", .{ v });
-//          }
-//
-//          pub inline fn handleError(v: i32, e: anyerror) !void {
-//              std.debug.print("error: {} occurred for: {}\n", .{ e, v });
-//              return e;
-//          }
-//      }).withCatch("handleError")),
-//   };
-
-//   const myBranch = dispatch.build(cases);
-//   const myValue: i32 = 10;
-
-//   try myBranch.doAll(&.{ myValue, 11, 13 });
-// }
-//
-//
