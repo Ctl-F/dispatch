@@ -9,6 +9,7 @@ pub fn default(comptime T: type) T {
         .array => .{},
         .bool => false,
         .optional => null,
+        .void => void{},
         else => std.mem.zeroInit(T, .{}),
     };
 }
@@ -40,4 +41,25 @@ pub fn minValue(comptime T: type) T {
         .float, .comptime_float => std.math.floatMin(T),
         else => @compileError("Type has no min/max"),
     };
+}
+
+pub fn equal(a: anytype, b: anytype) bool {
+    const aType = @TypeOf(a);
+    const bType = @TypeOf(b);
+
+    if (aType != bType) {
+        return std.meta.eql(a, b);
+    }
+
+    const info = @typeInfo(aType);
+
+    SWITCH: switch (info) {
+        .@"union" => |un| {
+            if (un.tag_type == null) break :SWITCH;
+            return std.meta.activeTag(a) == std.meta.activeTag(b);
+        },
+        else => {},
+    }
+
+    return std.meta.eql(a, b);
 }

@@ -1,112 +1,192 @@
 const std = @import("std");
 const dispatch = @import("dispatch");
 
-const case = dispatch.case;
-const binding = dispatch.binding;
-
-// fn onTen(ctx: *anyopaque, v: i32) anyerror!void {
-//     _ = ctx;
-//     std.debug.assert(v == 10);
-//     std.debug.print("Value is 10 indeed\n", .{});
-// }
-
-const CasesTag = enum {
-    first,
-    second,
-    third,
+const TokenType = enum {
+    none,
+    whitesp,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    pow,
+    sqr,
+    openParen,
+    closeParen,
+    number,
 };
 
-const Cases = union(CasesTag) {
-    first: First,
-    second: bool,
-    third: i32,
+const Token = union(TokenType) {
+    none: void,
+    whitesp: void,
+    add: void,
+    sub: void,
+    mul: void,
+    div: void,
+    mod: void,
+    pow: void,
+    sqr: void,
+    openParen: void,
+    closeParen: void,
+    number: f32,
+};
 
-    const First = struct {
-        string: []const u8 = "",
-        add: f32 = 0,
+const TokenContext = struct {
+    literal: []const u8,
+    tokens: std.ArrayList(Token),
+    allocator: std.mem.Allocator,
+    accumBuffer: [1028]u8 = [_]u8{0} ** 1028,
+    accum: []u8 = &.{},
+    currentTokenType: TokenType,
+
+    fn pushAccum(this: *@This(), a: u8) !void {
+        if (this.accum.len >= this.accumBuffer.len) {
+            return error.TokenIsTooLong;
+        }
+
+        this.accumBuffer[this.accum.len] = a;
+        this.accum = this.accumBuffer[0 .. this.accum.len + 1];
+    }
+
+    fn clearAccum(this: *@This()) void {
+        this.accum = &.{};
+    }
+
+    fn reduceInput(this: *@This()) !void {
+        if (this.literal.len == 0) return error.EmptyInput;
+
+        this.literal = this.literal[1..];
+    }
+};
+
+fn matchWhitespace(ctx: *TokenContext, d: u8) !void {
+    if (ctx.currentTokenType != .none) {
+        const token = switch (ctx.currentTokenType) {
+            .number => RES: {
+                std.debug.assert(ctx.accum.len > 0);
+
+                const value: f32 = try std.fmt.parseFloat(f32, ctx.accum);
+                break :RES Token{ .number = value };
+            },
+            else => @unionInit(Token, @tagName(ctx.currentTokenType), .{}),
+        };
+
+        try ctx.tokens.append(ctx.allocator, token);
+    }
+    ctx.clearAccum();
+    ctx.currentTokenType = .whitesp;
+    try ctx.pushAccum(d);
+    ctx.reduceInput() catch {
+        // TODO: finish
     };
+}
 
-    pub fn on_first(ctx: *anyopaque, f: First) anyerror!void {
-        _ = ctx;
-        std.debug.print("This is a string {s} and a float {}\n", .{ f.string, f.add });
+fn matchNumber(ctx: *TokenContext, d: u8) !void {}
+
+fn matchOperator(ctx: *TokenContext, d: u8) !void {}
+
+const Context = struct {
+    accum: f32,
+};
+
+const Operation = union(enum) {
+    ld: f32,
+    disp: void,
+    add: f32,
+    sub: f32,
+    div: f32,
+    mul: f32,
+    mod: f32,
+    sqrt: void,
+    pow: f32,
+
+    pub fn on_ld(ctx: *Context, val: f32) !void {
+        std.debug.print("{} ", .{val});
+        ctx.accum = val;
     }
 
-    pub fn on_second(ctx: *anyopaque, s: bool) anyerror!void {
-        _ = ctx;
-        std.debug.print("{}\n", .{s});
+    pub fn on_disp(ctx: *Context, _: void) !void {
+        std.debug.print("= {}\n", .{ctx.accum});
     }
 
-    pub fn on_third(ctx: *anyopaque, t: i32) anyerror!void {
+    pub fn on_add(ctx: *Context, add: f32) !void {
+        std.debug.print("+ {} ", .{add});
+
+        ctx.accum += add;
+    }
+
+    pub fn on_sub(ctx: *Context, val: f32) !void {
+        std.debug.print("- {} ", .{val});
+        ctx.accum -= val;
+    }
+
+    pub fn on_div(ctx: *Context, val: f32) !void {
+        if (val == 0.0) {
+            return error.DivideOnZero;
+        }
+
+        std.debug.print("/ {} ", .{val});
+
+        ctx.accum /= val;
+    }
+
+    pub fn on_divCatch(ctx: *Context, val: f32, err: anyerror) !void {
+        if (err != error.DivideByZero) return err;
+
+        std.debug.print("Cannot divide by zero!\n", .{});
         _ = ctx;
-        std.debug.print("{} + 2 = {}\n", .{ t, t + 2 });
+        _ = val;
+    }
+
+    pub fn on_mul(ctx: *Context, val: f32) !void {
+        std.debug.print("* {} ", .{val});
+        ctx.accum *= val;
+    }
+
+    pub fn on_mod(ctx: *Context, val: f32) !void {
+        if (val == 0.0) {
+            return error.DivideOnZero;
+        }
+
+        std.debug.print("% {} ", .{val});
+
+        ctx.accum = std.math.mod(f32, ctx.accum, val) catch unreachable;
+    }
+    pub fn on_modCatch(ctx: *Context, val: f32, err: anyerror) !void {
+        if (err != error.DivideByZero) return err;
+
+        std.debug.print("Cannot divide by zero!\n", .{});
+        _ = ctx;
+        _ = val;
+    }
+
+    pub fn on_sqrt(ctx: *Context, _: void) !void {
+        std.debug.print("_/ sqrt({}) ", .{ctx.accum});
+
+        ctx.accum = @sqrt(ctx.accum);
+    }
+
+    pub fn on_pow(ctx: *Context, val: f32) !void {
+        std.debug.print("** {} ", .{val});
+
+        ctx.accum = std.math.pow(f32, ctx.accum, val);
     }
 };
 
 pub fn main() !void {
-    // const decision = dispatch.build(Cases, .{
-    //     .cases = &.{
-    //         case(Cases{ .first = .{} }, binding("onFirst", Cases)),
-    //         case(Cases{ .second = false }, binding("onSecond", Cases)),
-    //         case(Cases{ .third = 0 }, binding("onThird", Cases)),
-    //     },
-    // });
+    const table = dispatch.buildWithContextType(Operation, Context, .{ .cases = dispatch.unwrapCasesWithContext(Context, Operation, "on_") }, .{});
 
-    const decision = dispatch.build(Cases, .{
-        .cases = dispatch.unwrapCases(Cases, "on_"),
-    });
+    const operations = [_]Operation{
+        .{ .ld = 7 },
+        .{ .mul = 6 },
+        .sqr,
+        .{ .add = 10 },
+        .sqrt,
+        .{ .mod = 3 },
+        .disp,
+    };
 
-    try decision.do(&.{}, Cases{ .first = .{ .string = "Hello ", .add = 42.0 } });
-    try decision.do(&.{}, Cases{ .second = true });
-    try decision.do(&.{}, Cases{ .third = 10 });
+    var context: Context = .{ .accum = 0.0 };
 
-    // const decision = dispatch.build(i32, .{
-    //     .cases = &.{
-    //         case(@as(i32, 10), onTen),
-    //         case(@as(i32, 11), binding("a", struct {
-    //             pub fn a(ctx: *anyopaque, v: i32) anyerror!void {
-    //                 _ = v;
-    //                 _ = ctx;
-    //                 return error.ErrorExample;
-    //             }
-    //             pub fn err(ctx: *anyopaque, v: i32, e: anyerror) anyerror!void {
-    //                 _ = ctx;
-    //                 std.debug.print("Error handler called [v/e]: {}/{}\n", .{ v, e });
-    //             }
-    //         }).withCatch("err")),
-    //         case(@as(i32, -1), binding("b", struct {
-    //             pub fn b(ctx: *anyopaque, v: i32) anyerror!void {
-    //                 _ = ctx;
-    //                 std.debug.print("value is: {}\n", .{v});
-    //             }
-    //         })),
-    //         case(@as(i32, -2), binding("b", struct {
-    //             pub fn b(ctx: *anyopaque, v: i32) anyerror!void {
-    //                 _ = ctx;
-    //                 std.debug.print("value is: {}\n", .{v});
-    //             }
-    //         })),
-    //         case(@as(i32, -10), binding("b", struct {
-    //             pub fn b(ctx: *anyopaque, v: i32) anyerror!void {
-    //                 _ = ctx;
-    //                 std.debug.print("value is: {}\n", .{v});
-    //             }
-    //         })),
-    //         case(@as(i32, -5), binding("b", struct {
-    //             pub fn b(ctx: *anyopaque, v: i32) anyerror!void {
-    //                 _ = ctx;
-    //                 std.debug.print("value is: {}\n", .{v});
-    //             }
-    //         })),
-    //         case(@as(i32, 5), binding("b", struct {
-    //             pub fn b(ctx: *anyopaque, v: i32) anyerror!void {
-    //                 _ = ctx;
-    //                 std.debug.print("value is: {}\n", .{v});
-    //             }
-    //         })),
-    //     },
-    // });
-
-    // try decision.do(&.{}, -10);
-    // try decision.do(&.{}, 10);
-    // try decision.do(&.{}, 11);
+    try table.doAll(&context, &operations);
 }

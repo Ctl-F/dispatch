@@ -1,5 +1,5 @@
 const std = @import("std");
-const util = @import("util");
+const Value = @import("value.zig");
 
 pub const CasePoolConfig = struct {
     method: enum { auto, ifChain, nativeSwitch, jumpTable } = .auto,
@@ -56,7 +56,11 @@ const Binding = struct {
 ///
 ///
 pub fn unwrapCases(bindee: type, comptime prefix: []const u8) []const CasePool(bindee, anyopaque, anyerror).Case {
-    const CasePoolType = CasePool(bindee, anyopaque, anyerror);
+    return unwrapCasesWithContext(anyopaque, bindee, prefix);
+}
+
+pub fn unwrapCasesWithContext(comptime ContextTy: type, bindee: type, comptime prefix: []const u8) []const CasePool(bindee, ContextTy, anyerror).Case {
+    const CasePoolType = CasePool(bindee, ContextTy, anyerror);
     const info = @typeInfo(bindee);
 
     if (info != .@"union") {
@@ -75,8 +79,18 @@ pub fn unwrapCases(bindee: type, comptime prefix: []const u8) []const CasePool(b
     comptime var cases: [tagsInfo.fields.len]CasePoolType.Case = undefined;
 
     inline for (tagsInfo.fields, 0..) |field, idx| {
-        const _binding = binding(prefix ++ field.name, bindee);
-        const instance = @unionInit(bindee, field.name, util.default(@FieldType(bindee, field.name)));
+        const _binding = GET_BINDING: { // TODO: add a way to do this explicitly rather than implicitly
+            const catchName = prefix ++ field.name ++ "Catch";
+            for (unionInfo.decls) |decl| {
+                if (std.mem.eql(u8, decl.name, catchName)) {
+                    break :GET_BINDING binding(prefix ++ field.name, bindee).withCatch(catchName);
+                }
+            }
+
+            break :GET_BINDING binding(prefix ++ field.name, bindee);
+        };
+        const instance = @unionInit(bindee, field.name, Value.default(@FieldType(bindee, field.name)));
+
         cases[idx] = CasePoolType.Case{ .value = instance, .prong = .{ .binding = _binding, .callable = null } };
     }
 
@@ -304,13 +318,13 @@ fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
 
         fn getCasesMinMax() ?struct { min: CasePoolType.BranchTy, max: CasePoolType.BranchTy } {
             comptime {
-                if (!util.canMinMax(CasePoolType.BranchTy)) {
+                if (!Value.canMinMax(CasePoolType.BranchTy)) {
                     return null;
                 }
 
                 var minMax: struct { min: CasePoolType.BranchTy, max: CasePoolType.BranchTy } = .{
-                    .min = util.maxValue(CasePoolType.BranchTy),
-                    .max = util.minValue(CasePoolType.BranchTy),
+                    .min = Value.maxValue(CasePoolType.BranchTy),
+                    .max = Value.minValue(CasePoolType.BranchTy),
                 };
 
                 for (casePool.cases) |_case| {
@@ -319,6 +333,22 @@ fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
                 }
 
                 return minMax;
+            }
+        }
+
+        inline fn doDispatch(comptime caseValue: CasePoolType.Case, ctx: *CasePoolType.ContextTy, payload: CasePoolType.BranchTy) CasePoolType.ErrorTy!void {
+            const info = @typeInfo(CasePoolType.BranchTy);
+
+            if (comptime info == .@"union") {
+                switch (payload) {
+                    inline else => |val, tag| {
+                        if (comptime tag == std.meta.activeTag(caseValue.value)) {
+                            try caseValue.prong.dispatch(ctx, val);
+                        }
+                    },
+                }
+            } else {
+                try caseValue.prong.dispatch(ctx, payload);
             }
         }
 
@@ -340,8 +370,8 @@ fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
                 }
 
                 inline for (casePool.cases) |caseValue| {
-                    if (std.meta.eql(caseValue.value, value)) {
-                        try caseValue.prong.dispatch(ctx, value);
+                    if (Value.equal(caseValue.value, value)) {
+                        try doDispatch(caseValue, ctx, value);
                         return;
                     }
                 }
@@ -349,8 +379,8 @@ fn IfChain(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
                 unreachable;
             } else {
                 inline for (casePool.cases) |caseValue| {
-                    if (std.meta.eql(caseValue.value, value)) {
-                        try caseValue.prong.dispatch(ctx, value);
+                    if (Value.equal(caseValue.value, value)) {
+                        try doDispatch(caseValue, ctx, value);
                         return;
                     }
                 }
@@ -511,13 +541,13 @@ fn JumpTable(comptime CasePoolType: type, comptime casePool: CasePoolType) type 
 fn NativeSwitch(comptime CasePoolType: type, comptime casePool: CasePoolType) type {
     return struct {
         pub inline fn do(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
-            const fields, const isUnion = validateInfo();
+            const info = validateInfo();
 
-            if (casePool.cases.len != fields.len) {
+            if (casePool.cases.len != info.fields.len) {
                 @compileError("Not every enum case has a handler.");
             }
 
-            if (comptime isUnion) {
+            if (comptime info.isUnion) {
                 switch (value) {
                     inline else => |payload, tag| {
                         inline for (casePool.cases) |_case| {
@@ -567,13 +597,13 @@ fn NativeSwitch(comptime CasePoolType: type, comptime casePool: CasePoolType) ty
         }
 
         pub inline fn doStreamed(ctx: *CasePoolType.ContextTy, value: CasePoolType.BranchTy, comptime selector: fn (c: *CasePoolType.ContextTy) ?CasePoolType.BranchTy) (CasePoolType.ErrorTy || StreamedDispatchError)!void {
-            const fields, const isUnion = validateInfo();
+            const info = validateInfo();
 
-            if (casePool.cases.len != fields.len) {
+            if (casePool.cases.len != info.fields.len) {
                 @compileError("Not every enum case has a handler.");
             }
 
-            if (comptime isUnion) {
+            if (comptime info.isUnion) {
                 SWITCH: switch (value) {
                     inline else => |payload, tag| {
                         inline for (casePool.cases) |_case| {
